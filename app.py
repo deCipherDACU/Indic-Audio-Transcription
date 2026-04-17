@@ -108,6 +108,27 @@ def transcribe_audio():
     if audio_file.filename == '':
         return jsonify({"success": False, "error": "No file selected."}), 400
 
+    try:
+        filename = audio_file.filename
+        file_bytes = audio_file.read()
+        
+        # Calculate size before reading further
+        size_mb = len(file_bytes) / (1024 * 1024)
+
+        # Sarvam params
+        language_code = request.form.get("language_code", "unknown")
+        model = request.form.get("model", "saaras:v3")
+        mode = request.form.get("mode", "transcribe")
+        with_diarization = request.form.get("with_diarization", "false").lower() == "true"
+        
+        headers = {
+            "api-subscription-key": api_key,
+        }
+        
+        files = {
+            'file': (filename, file_bytes, audio_file.mimetype or 'audio/mpeg')
+        }
+
         # ----------------------------------------------------
         # BRANCH: Diarization / Batch Mode
         # ----------------------------------------------------
