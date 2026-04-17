@@ -160,8 +160,16 @@
 
                 <div class="relative flex-grow flex flex-col">
                     <div id="loadingState" class="hidden absolute inset-0 z-20 bg-[#0a0a0a] items-center justify-center flex-col">
-                        <div class="spinner mb-4"></div>
-                        <span class="text-sm font-medium text-zinc-400">Processing audio via robust Python backend...</span>
+                        <div class="spinner mb-4" id="loadingSpinner"></div>
+                        <span class="text-sm font-medium text-zinc-400 mb-4" id="loadingText">Processing audio via robust Python backend...</span>
+                        
+                        <!-- Progress Bar UI -->
+                        <div id="progressContainer" class="w-64 hidden flex-col items-center">
+                            <div class="w-full bg-[#18181b] rounded-full h-1.5 mb-2 overflow-hidden border border-[#27272a]">
+                                <div id="progressBar" class="bg-white h-1.5 rounded-full" style="width: 0%"></div>
+                            </div>
+                            <span id="progressText" class="text-[10px] text-zinc-500 font-mono tracking-wider">0% UPLOADED</span>
+                        </div>
                     </div>
 
                     <div id="resultSection" class="hidden flex-col h-full z-10 fade-in flex-grow">
@@ -221,6 +229,12 @@
         const activeUploadState = document.getElementById('activeUploadState');
         const clearFileBtn = document.getElementById('clearFileBtn');
         const loadingState = document.getElementById('loadingState');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const loadingText = document.getElementById('loadingText');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        
         const resultSection = document.getElementById('resultSection');
         const transcriptionText = document.getElementById('transcriptionText');
         const errorBanner = document.getElementById('errorBanner');
@@ -364,6 +378,14 @@
             resultSection.classList.add('hidden');
             loadingState.classList.remove('hidden');
             loadingState.classList.add('flex');
+            
+            // Reset Progress UI
+            progressContainer.classList.remove('hidden');
+            progressContainer.classList.add('flex');
+            progressBar.style.width = '0%';
+            progressText.textContent = '0% UPLOADED';
+            loadingSpinner.classList.add('hidden');
+            loadingText.textContent = 'Uploading to Render Backend...';
 
             try {
                 const formData = new FormData();
@@ -373,19 +395,46 @@
                 formData.append('model', document.getElementById('model').value);
                 formData.append('with_diarization', document.getElementById('diarization').checked ? 'true' : 'false');
 
-                const response = await fetch('/api/transcribe', {
-                    method: 'POST',
-                    body: formData
+                // Using XMLHttpRequest to track upload progress
+                const responseText = await new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    
+                    xhr.upload.addEventListener('progress', (event) => {
+                        if (event.lengthComputable) {
+                            const percentComplete = Math.round((event.loaded / event.total) * 100);
+                            progressBar.style.width = percentComplete + '%';
+                            progressText.textContent = percentComplete + '% UPLOADED';
+                            
+                            if (percentComplete === 100) {
+                                loadingText.textContent = 'Transcribing with Sarvam AI... (This may take a minute)';
+                                progressContainer.classList.remove('flex');
+                                progressContainer.classList.add('hidden');
+                                loadingSpinner.classList.remove('hidden');
+                            }
+                        }
+                    });
+
+                    xhr.addEventListener('load', () => {
+                        resolve({ status: xhr.status, response: xhr.responseText });
+                    });
+
+                    xhr.addEventListener('error', () => {
+                        reject(new Error('Network error during file upload.'));
+                    });
+                    
+                    xhr.addEventListener('timeout', () => {
+                        reject(new Error('Connection timed out. Server taking too long.'));
+                    });
+
+                    xhr.open('POST', '/api/transcribe');
+                    xhr.send(formData);
                 });
 
-                // Prevent raw .json() from crashing if Render.com times out or returns empty 502 error
-                const responseText = await response.text();
-                
                 let data;
                 try {
-                    data = JSON.parse(responseText);
+                    data = JSON.parse(responseText.response);
                 } catch(e) {
-                    throw new Error(`Server crashed or timed out (Status ${response.status}). Render.com Gunicorn workers timeout after 30s by default.`);
+                    throw new Error(`Server crashed or timed out (Status ${responseText.status}). Render.com Gunicorn workers timeout after 30s by default.`);
                 }
 
                 if(!data.success) {
