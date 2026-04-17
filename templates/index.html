@@ -441,6 +441,21 @@
                     throw new Error(data.error || 'Server rejected transcription.');
                 }
 
+                // --- Handle Batch Job (Asynchronous) --- //
+                if (data.batch_job_id) {
+                    loadingText.textContent = `Batch Job Created: ${data.batch_job_id}. Diarizing...`;
+                    loadingSpinner.classList.remove('hidden');
+                    
+                    pollJobStatus(data.batch_job_id, {
+                        filename: data.filename,
+                        size_mb: data.size_mb,
+                        mode: data.mode,
+                        lang: data.language_code
+                    });
+                    return; // Early return, pollJobStatus handles the rest
+                }
+
+                // --- Handle Synchronous Response --- //
                 transcriptionText.textContent = data.transcript_preview || JSON.stringify(data.data, null, 2);
                 resultSection.classList.remove('hidden');
                 resultSection.classList.add('flex');
@@ -453,10 +468,51 @@
                 errorText.textContent = err.message || 'Fatal error communicating with Python backend.';
                 errorBanner.classList.remove('hidden');
             } finally {
-                loadingState.classList.add('hidden');
-                loadingState.classList.remove('flex');
+                // Only hide loading state if it's NOT a batch job (polling handles that)
+                const isBatch = document.getElementById('loadingText').textContent.includes('Batch Job');
+                if (!isBatch) {
+                    loadingState.classList.add('hidden');
+                    loadingState.classList.remove('flex');
+                }
             }
         });
+
+        async function pollJobStatus(jobId, metadata) {
+            const pollInterval = setInterval(async () => {
+                try {
+                    const params = new URLSearchParams(metadata);
+                    const res = await fetch(`/api/job-status/${jobId}?${params.toString()}`);
+                    const data = await res.json();
+
+                    if (!data.success) {
+                        clearInterval(pollInterval);
+                        errorText.textContent = data.error || 'Polling error.';
+                        errorBanner.classList.remove('hidden');
+                        loadingState.classList.add('hidden');
+                        return;
+                    }
+
+                    if (data.state === 'Completed') {
+                        clearInterval(pollInterval);
+                        transcriptionText.textContent = data.transcript;
+                        resultSection.classList.remove('hidden');
+                        resultSection.classList.add('flex');
+                        loadingState.classList.add('hidden');
+                        fetchHistory(); // Refresh history with new batch result
+                    } else if (data.state === 'Failed') {
+                        clearInterval(pollInterval);
+                        errorText.textContent = `Batch Job Failed: ${data.error}`;
+                        errorBanner.classList.remove('hidden');
+                        loadingState.classList.add('hidden');
+                    } else {
+                        // Still Accepted, Pending, or Running
+                        loadingText.textContent = `Status: ${data.state}... Processing large file with diarization.`;
+                    }
+                } catch (err) {
+                    console.error("Polling error:", err);
+                }
+            }, 6000); // Poll every 6 seconds
+        }
 
         document.getElementById('copyBtn').addEventListener('click', () => {
             navigator.clipboard.writeText(transcriptionText.textContent).then(() => {
