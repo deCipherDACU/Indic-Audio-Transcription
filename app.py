@@ -95,154 +95,79 @@ def clear_history():
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe_audio():
-    # Only load API key from secure environment variable
+    """Starts a Batch STT job for the provided audio file."""
     api_key = os.getenv("SARVAM_API_KEY")
-        
     if not api_key:
-        return jsonify({"success": False, "error": "SARVAM_API_KEY not found in server environment configuration - backend deployment error."}), 500
+        return jsonify({"success": False, "error": "SARVAM_API_KEY missing from environment."}), 500
 
     if 'file' not in request.files:
-        return jsonify({"success": False, "error": "No audio file provided in the request payload."}), 400
+        return jsonify({"success": False, "error": "No file uploaded."}), 400
 
     audio_file = request.files['file']
     if audio_file.filename == '':
-        return jsonify({"success": False, "error": "No file selected."}), 400
+        return jsonify({"success": False, "error": "Empty filename."}), 400
 
     try:
         filename = audio_file.filename
         file_bytes = audio_file.read()
-        
-        # Calculate size before reading further
         size_mb = len(file_bytes) / (1024 * 1024)
 
-        # Sarvam params
-        language_code = request.form.get("language_code", "unknown")
+        # Get params from form
         model = request.form.get("model", "saaras:v3")
         mode = request.form.get("mode", "transcribe")
         with_diarization = request.form.get("with_diarization", "false").lower() == "true"
-        
-        headers = {
-            "api-subscription-key": api_key,
-        }
-        
-        files = {
-            'file': (filename, file_bytes, audio_file.mimetype or 'audio/mpeg')
-        }
+        language_code = request.form.get("language_code", "unknown")
 
-        # ----------------------------------------------------
-        # BRANCH: Diarization / Batch Mode
-        # ----------------------------------------------------
-        if with_diarization:
-            print(f"Diarization enabled. Switching to Batch STT Workflow for {filename}...")
-            
-            # 1. Initiate Job
-            job_init_payload = {
-                "inputs": [{"file_name": filename}],
-                "job_parameters": {
-                    "model": model,
-                    "mode": mode,
-                    "with_diarization": True
-                }
-            }
-            init_res = requests.post(
-                "https://api.sarvam.ai/speech-to-text/job/v1",
-                headers=headers,
-                json=job_init_payload
-            )
-            if not init_res.ok:
-                return jsonify({"success": False, "error": f"Batch Init Error: {init_res.text}"}), init_res.status_code
-            
-            job_id = init_res.json().get("job_id")
-            
-            # 2. Get Upload URLs
-            upload_url_payload = {
-                "job_id": job_id,
-                "files": [filename]
-            }
-            url_res = requests.post(
-                "https://api.sarvam.ai/speech-to-text/job/v1/upload-files",
-                headers=headers,
-                json=upload_url_payload
-            )
-            if not url_res.ok:
-                return jsonify({"success": False, "error": f"Upload URL Error: {url_res.text}"}), url_res.status_code
-            
-            upload_data = url_res.json()
-            # Expecting a list of {file_name, url}
-            presigned_url = None
-            for item in upload_data:
-                if item.get("file_name") == filename:
-                    presigned_url = item.get("url")
-            
-            if not presigned_url:
-                return jsonify({"success": False, "error": "Could not obtain pre-signed upload URL from Sarvam."}), 500
+        headers = {"api-subscription-key": api_key}
 
-            # 3. Upload File (PUT)
-            # Use audio_file.mimetype if possible, or fallback
-            upload_res = requests.put(presigned_url, data=file_bytes)
-            if not upload_res.ok:
-                return jsonify({"success": False, "error": f"File Storage Upload Error: {upload_res.text}"}), 500
-            
-            # 4. Start Job
-            start_res = requests.post(
-                f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/start",
-                headers=headers
-            )
-            if not start_res.ok:
-                return jsonify({"success": False, "error": f"Batch Start Error: {start_res.text}"}), start_res.status_code
-
-            # Return job_id to frontend for polling
-            return jsonify({
-                "success": True,
-                "batch_job_id": job_id,
-                "filename": filename,
-                "size_mb": f"{size_mb:.2f}",
+        # --- 1. Initiate Batch Job ---
+        job_payload = {
+            "inputs": [{"file_name": filename}],
+            "job_parameters": {
+                "model": model,
                 "mode": mode,
+                "with_diarization": with_diarization,
                 "language_code": language_code
-            })
-
-        # ----------------------------------------------------
-        # BRANCH: Real-time STT (Synchronous)
-        # ----------------------------------------------------
-        data = {
-            'language_code': language_code,
-            'model': model,
-            'mode': mode,
-            'with_diarization': "false" # Real-time doesn't support it
+            }
         }
         
-        sarvam_response = requests.post(
-            "https://api.sarvam.ai/speech-to-text",
-            headers=headers,
-            files=files,
-            data=data
-        )
-
-        # Bubble up any direct api errors smoothly
-        if not sarvam_response.ok:
-            error_message = f"API Error {sarvam_response.status_code}: {sarvam_response.text}"
-            return jsonify({"success": False, "error": error_message}), sarvam_response.status_code
-
-        response_json = sarvam_response.json()
+        print(f"Initializing Batch Job for {filename} ({size_mb:.2f}MB, Mode: {mode})...")
+        init_res = requests.post("https://api.sarvam.ai/speech-to-text/job/v1", headers=headers, json=job_payload)
+        if not init_res.ok:
+            return jsonify({"success": False, "error": f"Init Error: {init_res.text}"}), init_res.status_code
         
-        # Identify the exact transcription text
-        transcript_text = ""
-        if 'transcript' in response_json:
-            transcript_text = response_json['transcript']
-        elif 'data' in response_json and 'transcript' in response_json['data']:
-            transcript_text = response_json['data']['transcript']
-        else:
-            transcript_text = json.dumps(response_json, indent=2)
+        job_id = init_res.json().get("job_id")
 
-        # ----------------------------------------------------
-        # Save to Database History (7-Day Cache)
-        # ----------------------------------------------------
-        save_to_db(filename, size_mb, language_code, mode, transcript_text)
+        # --- 2. Get Upload URL ---
+        url_payload = {"job_id": job_id, "files": [filename]}
+        url_res = requests.post("https://api.sarvam.ai/speech-to-text/job/v1/upload-files", headers=headers, json=url_payload)
+        if not url_res.ok:
+            return jsonify({"success": False, "error": f"Upload URL Error: {url_res.text}"}), url_res.status_code
+        
+        presigned_url = None
+        for item in url_res.json():
+            if item.get("file_name") == filename:
+                presigned_url = item.get("url")
+        
+        if not presigned_url:
+            return jsonify({"success": False, "error": "Pre-signed URL retrieval failed."}), 500
 
+        # --- 3. Upload File ---
+        requests.put(presigned_url, data=file_bytes)
+        
+        # --- 4. Start Job ---
+        start_res = requests.post(f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/start", headers=headers)
+        if not start_res.ok:
+            return jsonify({"success": False, "error": f"Start Error: {start_res.text}"}), start_res.status_code
+
+        # Return Job ID to frontend
         return jsonify({
-            "success": True,
-            "data": response_json,
-            "transcript_preview": transcript_text
+            "success": True, 
+            "batch_job_id": job_id, 
+            "filename": filename, 
+            "size_mb": f"{size_mb:.2f}",
+            "mode": mode,
+            "language_code": language_code
         })
 
     except Exception as e:
@@ -251,8 +176,58 @@ def transcribe_audio():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/job-status/<job_id>', methods=['GET'])
+def get_job_status(job_id):
+    """Polls the Sarvam Batch STT job status and returns formatted transcript."""
+    api_key = os.getenv("SARVAM_API_KEY")
+    headers = {"api-subscription-key": api_key}
+    
+    try:
+        status_res = requests.get(f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/status", headers=headers)
+        if not status_res.ok:
+            return jsonify({"success": False, "error": f"Status Poll Error: {status_res.text}"}), status_res.status_code
+        
+        status_data = status_res.json()
+        job_state = status_data.get("job_state")
+        
+        if job_state == "Completed":
+            # Fetch and process results
+            results_res = requests.post(f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/results", headers=headers)
+            if not results_res.ok:
+                return jsonify({"success": False, "error": f"Results Error: {results_res.text}"}), results_res.status_code
+            
+            results_data = results_res.json()
+            scripts = results_data.get("scripts", [])
+            transcript_text = "Transcription failed or empty."
+            
+            if scripts:
+                script = scripts[0]
+                if "diarized_transcript" in script:
+                    entries = script["diarized_transcript"].get("entries", [])
+                    transcript_text = "\n\n".join([f"[Speaker {e.get('speaker_id')}]: {e.get('transcript')}" for e in entries])
+                else:
+                    transcript_text = script.get("transcript", "No transcript found.")
+
+            # Save to persistent history
+            filename = request.args.get("filename", "batch_file")
+            size_mb = float(request.args.get("size_mb", 0))
+            lang = request.args.get("lang", "unknown")
+            mode = request.args.get("mode", "transcribe")
+            save_to_db(filename, size_mb, lang, mode, transcript_text)
+            
+            return jsonify({"success": True, "state": "Completed", "transcript": transcript_text})
+        
+        elif job_state == "Failed":
+            return jsonify({"success": True, "state": "Failed", "error": status_data.get("error_message", "Job failed.")})
+        
+        return jsonify({"success": True, "state": job_state})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 def save_to_db(filename, size_mb, language_code, mode, transcript_text):
-    """Helper to persist transcription results."""
+    """Persists records in SQLite history for 7 days."""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -264,86 +239,7 @@ def save_to_db(filename, size_mb, language_code, mode, transcript_text):
         conn.close()
         cleanup_old_history()
     except Exception as e:
-        print(f"Database save error: {e}")
-
-
-@app.route('/api/job-status/<job_id>', methods=['GET'])
-def get_job_status(job_id):
-    """Polls the Sarvam Batch STT job status and retrieves results if completed."""
-    api_key = os.getenv("SARVAM_API_KEY")
-    headers = {"api-subscription-key": api_key}
-    
-    try:
-        # 1. Check Status
-        status_res = requests.get(
-            f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/status",
-            headers=headers
-        )
-        if not status_res.ok:
-            return jsonify({"success": False, "error": f"Status Poll Error: {status_res.text}"}), status_res.status_code
-        
-        status_data = status_res.json()
-        job_state = status_data.get("job_state")
-        
-        if job_state == "Completed":
-            # 2. Fetch Results
-            results_res = requests.post(
-                f"https://api.sarvam.ai/speech-to-text/job/v1/{job_id}/results",
-                headers=headers
-            )
-            if not results_res.ok:
-                return jsonify({"success": False, "error": f"Results Fetch Error: {results_res.text}"}), results_res.status_code
-            
-            results_data = results_res.json()
-            
-            # Extract transcript from the first file (since we only upload one)
-            # Structure: {"job_id": "...", "scripts": [{"file_name": "...", "transcript": "...", "diarized_transcript": {...}}]}
-            scripts = results_data.get("scripts", [])
-            transcript_text = "No transcript found."
-            if scripts:
-                script = scripts[0]
-                if "diarized_transcript" in script:
-                    # Format diarized output nicely if available
-                    entries = script["diarized_transcript"].get("entries", [])
-                    if entries:
-                        formatted_parts = []
-                        for entry in entries:
-                            speaker = f"Speaker {entry.get('speaker_id')}"
-                            formatted_parts.append(f"[{speaker}]: {entry.get('transcript')}")
-                        transcript_text = "\n\n".join(formatted_parts)
-                    else:
-                        transcript_text = script.get("transcript", "")
-                else:
-                    transcript_text = script.get("transcript", "")
-
-            # 3. Save to History
-            # We need to get original metadata from the request context or just assume it?
-            # Actually, the frontend should send metadata if it wants it saved accurately.
-            # But for now, we'll save what we have.
-            filename = request.args.get("filename", "unknown_batch_file")
-            size_mb = float(request.args.get("size_mb", 0))
-            mode = request.args.get("mode", "transcribe")
-            lang = request.args.get("lang", "unknown")
-            
-            save_to_db(filename, size_mb, lang, mode, transcript_text)
-            
-            return jsonify({
-                "success": True,
-                "state": "Completed",
-                "transcript": transcript_text,
-                "full_data": results_data
-            })
-        
-        elif job_state == "Failed":
-            error_msg = status_data.get("error_message", "Unknown batch error.")
-            return jsonify({"success": True, "state": "Failed", "error": error_msg})
-        
-        else:
-            # Still Pending, Running, etc.
-            return jsonify({"success": True, "state": job_state})
-
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        print(f"DB Error: {e}")
 
 
 if __name__ == '__main__':

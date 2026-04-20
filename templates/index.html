@@ -102,9 +102,11 @@
                         <label for="mode" class="text-sm font-medium text-zinc-300 mb-2">Output Mode</label>
                         <div class="select-wrapper">
                             <select id="mode" name="mode" class="eleven-input rounded-md px-3 py-2 text-sm w-full">
-                                <option value="transcribe" selected>Transcribe explicitly</option>
+                                <option value="transcribe" selected>Standard Transcription</option>
                                 <option value="translate">Translate to English</option>
-                                <option value="verbatim">Verbatim (Include hesitations)</option>
+                                <option value="verbatim">Verbatim (Include fillers)</option>
+                                <option value="translit">Transliterate (Roman script)</option>
+                                <option value="codemix">Codemix (Hybrid Hinglish)</option>
                             </select>
                         </div>
                     </div>
@@ -437,13 +439,8 @@
                     throw new Error(`Server crashed or timed out (Status ${responseText.status}). Render.com Gunicorn workers timeout after 30s by default.`);
                 }
 
-                if(!data.success) {
-                    throw new Error(data.error || 'Server rejected transcription.');
-                }
-
-                // --- Handle Batch Job (Asynchronous) --- //
                 if (data.batch_job_id) {
-                    loadingText.textContent = `Batch Job Created: ${data.batch_job_id}. Diarizing...`;
+                    loadingText.textContent = `Batch Job Created: ${data.batch_job_id}. Processing...`;
                     loadingSpinner.classList.remove('hidden');
                     
                     pollJobStatus(data.batch_job_id, {
@@ -452,28 +449,15 @@
                         mode: data.mode,
                         lang: data.language_code
                     });
-                    return; // Early return, pollJobStatus handles the rest
+                } else {
+                    throw new Error(data.error || 'Server failed to initiate batch processing.');
                 }
-
-                // --- Handle Synchronous Response --- //
-                transcriptionText.textContent = data.transcript_preview || JSON.stringify(data.data, null, 2);
-                resultSection.classList.remove('hidden');
-                resultSection.classList.add('flex');
-
-                // Since we successfully transcribed, refresh backend history panel seamlessly
-                fetchHistory();
 
             } catch (err) {
                 console.error(err);
                 errorText.textContent = err.message || 'Fatal error communicating with Python backend.';
                 errorBanner.classList.remove('hidden');
-            } finally {
-                // Only hide loading state if it's NOT a batch job (polling handles that)
-                const isBatch = document.getElementById('loadingText').textContent.includes('Batch Job');
-                if (!isBatch) {
-                    loadingState.classList.add('hidden');
-                    loadingState.classList.remove('flex');
-                }
+                loadingState.classList.add('hidden');
             }
         });
 
